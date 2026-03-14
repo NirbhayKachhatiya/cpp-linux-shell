@@ -45,6 +45,7 @@ int main()
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
     std::string input;
+    fs::path current_path = fs::current_path();
     while (true)
     {
         std::cout << "$ ";
@@ -88,8 +89,60 @@ int main()
         }
         else if (input == "pwd")
         {
-            fs::path current_path = fs::current_path();
             std::cout << current_path.string() << std::endl;
+        }
+        else if (input.substr(0, 3) == "cd ")
+        {
+            std::string newPath = input.substr(3);
+            // the path is absolute
+            if (newPath[0] == '/')
+            {
+                if (fs::exists(newPath))
+                {
+                    fs::path path = newPath;
+                    current_path = path;
+                }
+                else
+                {
+                    std::cout << "cd: " << newPath << ": No such file or directory" << std::endl;
+                }
+            }
+            // the path is relative
+            else
+            {
+                std::stringstream ss(newPath);
+                fs::path tempPath = current_path;
+                std::string folder;
+                bool change = true;
+                int index = 0;
+                while (getline(ss, folder, '/'))
+                {
+                    if (folder == ".")
+                        continue;
+                    else if (folder == "..")
+                    {
+                        tempPath = tempPath.parent_path();
+                    }
+                    else if ((folder == "~") && (index==0)){
+                        tempPath = fs::path(std::getenv("HOME"));
+                    }
+                    else
+                    {
+                        tempPath = tempPath / folder;
+                        if (!fs::exists(tempPath))
+                        {
+                            std::cout << "cd: " << newPath << ": No such file or directory" << std::endl;
+                            change = false;
+                            break;
+                        }
+                    }
+                    index=1;
+                }
+                if (change)
+                {
+                    current_path = tempPath;
+                }
+            }
         }
         else
         {
