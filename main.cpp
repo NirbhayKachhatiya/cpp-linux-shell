@@ -40,6 +40,73 @@ std::string find_path(std::string &word)
     return found_path;
 }
 
+std::vector<std::string> tokenize(const std::string &input)
+{
+    // Tokenize input string, handling single quotes: preserve spaces inside quotes,concatenate adjacent quoted strings, ignore empty quotes
+    std::vector<std::string> tokens;
+    std::string current;
+    size_t i = 0;
+    while (i < input.size())
+    {
+        if (input[i] == ' ')
+        {
+            // Push current token if not empty, then skip space
+            if (!current.empty())
+            {
+                tokens.push_back(current);
+                current.clear();
+            }
+            ++i;
+        }
+        else if (input[i] == '\'')
+        {
+            // Extract content inside single quotes and append to current token
+            size_t start = i + 1;
+            size_t end = input.find('\'', start);
+            std::string quoted;
+            if (end == std::string::npos)
+            {
+                quoted = input.substr(start);
+                i = input.size();
+            }
+            else
+            {
+                quoted = input.substr(start, end - start);
+                i = end + 1;
+            }
+            current += quoted;
+            // Handle adjacent quotes for concatenation
+            while (i < input.size() && input[i] == '\'')
+            {
+                size_t next_start = i + 1;
+                size_t next_end = input.find('\'', next_start);
+                if (next_end == std::string::npos)
+                {
+                    current += input.substr(next_start);
+                    i = input.size();
+                }
+                else
+                {
+                    current += input.substr(next_start, next_end - next_start);
+                    i = next_end + 1;
+                }
+            }
+        }
+        else
+        {
+            // Append unquoted character to current token
+            current += input[i];
+            ++i;
+        }
+    }
+    // Push any remaining token
+    if (!current.empty())
+    {
+        tokens.push_back(current);
+    }
+    return tokens;
+}
+
 int main()
 {
     std::cout << std::unitbuf;
@@ -55,12 +122,27 @@ int main()
             break;
         else if (input.substr(0, 5) == "echo ")
         {
-            std::cout << input.substr(5) << std::endl;
+            // Parse echo arguments, handling quotes, and print them separated by spaces
+            auto args = tokenize(input.substr(5));
+            for (size_t i = 0; i < args.size(); ++i)
+            {
+                if (i > 0)
+                    std::cout << " ";
+                std::cout << args[i];
+            }
+            std::cout << std::endl;
         }
         else if (input.substr(0, 5) == "type ")
         {
+            // Parse type command argument, handling quotes
+            auto args = tokenize(input.substr(5));
+            if (args.size() != 1)
+            {
+                std::cout << "type: expected 1 argument" << std::endl;
+                continue;
+            }
+            std::string word = args[0];
             std::vector<std::string> valid = {"echo", "exit", "type", "pwd"};
-            std::string word = input.substr(5);
             bool val = 0;
             for (auto cmd : valid)
             {
@@ -93,7 +175,14 @@ int main()
         }
         else if (input.substr(0, 3) == "cd ")
         {
-            std::string newPath = input.substr(3);
+            // Parse cd command argument, handling quotes
+            auto args = tokenize(input.substr(3));
+            if (args.size() != 1)
+            {
+                std::cout << "cd: expected 1 argument" << std::endl;
+                continue;
+            }
+            std::string newPath = args[0];
             // the path is absolute
             if (newPath[0] == '/')
             {
@@ -123,7 +212,8 @@ int main()
                     {
                         tempPath = tempPath.parent_path();
                     }
-                    else if ((folder == "~") && (index==0)){
+                    else if ((folder == "~") && (index == 0))
+                    {
                         tempPath = fs::path(std::getenv("HOME"));
                     }
                     else
@@ -136,7 +226,7 @@ int main()
                             break;
                         }
                     }
-                    index=1;
+                    index = 1;
                 }
                 if (change)
                 {
@@ -146,16 +236,13 @@ int main()
         }
         else
         {
-            std::stringstream ss(input);
-            std::vector<std::string> args;
-            std::string cur;
-            while (std::getline(ss, cur, ' '))
-            {
-                args.push_back(cur);
-            }
+            // Parse external command arguments, handling quotes
+            auto args = tokenize(input);
+            if (args.empty())
+                continue;
             std::string found_path = find_path(args[0]);
             if (found_path.size() == 0)
-                std::cout << input << ": command not found" << std::endl;
+                std::cout << args[0] << ": command not found" << std::endl;
             else
             {
                 // create a child process (to execute the command)
