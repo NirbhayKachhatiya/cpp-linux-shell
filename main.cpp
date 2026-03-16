@@ -12,6 +12,8 @@
 
 #include <sys/wait.h>
 
+#include <fcntl.h>
+
 namespace fs = std::filesystem;
 
 std::string find_path(std::string & word) {
@@ -122,14 +124,115 @@ int main() {
     if (input == "exit")
       break;
     else if (input.substr(0, 5) == "echo ") {
-      // Parse echo arguments, handling quotes, and print them separated by spaces
+      // Parse echo arguments, handling quotes and redirection
       auto args = tokenize(input.substr(5));
+      
+      // Parse for redirection in echo command
+      std::vector<std::string> echo_args;
+      std::string redirect_file = "";
+      int redirect_fd = 1; // 1 for stdout, 2 for stderr
+      bool redirect = false;
+      bool append_mode = false;
       for (size_t i = 0; i < args.size(); ++i) {
-        if (i > 0)
-          std::cout << " ";
-        std::cout << args[i];
+        if (args[i] == ">" || args[i] == "1>") {
+          // redirect stdout (truncate mode)
+          if (i + 1 < args.size()) {
+            redirect_file = args[i + 1];
+            redirect_fd = 1;
+            redirect = true;
+            append_mode = false;
+            break;
+          } else {
+            std::cout << "syntax error: expected file after " << args[i] << std::endl;
+            continue;
+          }
+        } else if (args[i] == ">>" || args[i] == "1>>") {
+          // redirect stdout (append mode)
+          if (i + 1 < args.size()) {
+            redirect_file = args[i + 1];
+            redirect_fd = 1;
+            redirect = true;
+            append_mode = true;
+            break;
+          } else {
+            std::cout << "syntax error: expected file after " << args[i] << std::endl;
+            continue;
+          }
+        } else if (args[i] == "2>") {
+          // redirect stderr (truncate mode)
+          if (i + 1 < args.size()) {
+            redirect_file = args[i + 1];
+            redirect_fd = 2;
+            redirect = true;
+            append_mode = false;
+            break;
+          } else {
+            std::cout << "syntax error: expected file after " << args[i] << std::endl;
+            continue;
+          }
+        } else if (args[i] == "2>>") {
+          // redirect stderr (append mode)
+          if (i + 1 < args.size()) {
+            redirect_file = args[i + 1];
+            redirect_fd = 2;
+            redirect = true;
+            append_mode = true;
+            break;
+          } else {
+            std::cout << "syntax error: expected file after " << args[i] << std::endl;
+            continue;
+          }
+        } else {
+          echo_args.push_back(args[i]);
+        }
       }
-      std::cout << std::endl;
+      
+      // Handle redirection for echo
+      int saved_fd = -1;
+      if (redirect) {
+        // open the file for writing, create if doesn't exist
+        // O_WRONLY: open for writing only
+        // O_CREAT: create the file if it doesn't exist
+        // O_TRUNC: truncate the file to zero length if it exists (used with >)
+        // O_APPEND: append to the end of file (used with >>)
+        // 0644: permissions for the file (rw-r--r--)
+        int flags = O_WRONLY | O_CREAT;
+        if (append_mode) {
+          flags |= O_APPEND;
+        } else {
+          flags |= O_TRUNC;
+        }
+        int fd = open(redirect_file.c_str(), flags, 0644);
+        if (fd == -1) {
+          std::cerr << "failed to open file: " << redirect_file << std::endl;
+          continue;
+        }
+        // dup the current file descriptor to save it for later restoration
+        int target_fd = (redirect_fd == 1) ? STDOUT_FILENO : STDERR_FILENO;
+        saved_fd = dup(target_fd);
+        // dup2 duplicates the file descriptor fd to the target fd, closing the old one
+        // now writes to the target fd will go to the file
+        dup2(fd, target_fd);
+        close(fd); // close the original fd since target now points to it
+      }
+      
+      // Print the echo arguments using write to ensure it goes to the correct fd
+      std::string output;
+      for (size_t i = 0; i < echo_args.size(); ++i) {
+        if (i > 0) output += " ";
+        output += echo_args[i];
+      }
+      output += "\n";
+      // write directly to STDOUT_FILENO, which may be redirected
+      write(STDOUT_FILENO, output.c_str(), output.size());
+      
+      // Restore the file descriptor if redirected
+      if (redirect && saved_fd != -1) {
+        int target_fd = (redirect_fd == 1) ? STDOUT_FILENO : STDERR_FILENO;
+        // dup2 the saved fd back to the target fd
+        dup2(saved_fd, target_fd);
+        close(saved_fd); // close the duplicate
+      }
     } else if (input.substr(0, 5) == "type ") {
       // Parse type command argument, handling quotes
       auto args = tokenize(input.substr(5));
@@ -213,17 +316,105 @@ int main() {
       auto args = tokenize(input);
       if (args.empty())
         continue;
-      std::string found_path = find_path(args[0]);
+      
+      // Parse for redirection - we need to separate the command from the redirection operator and file
+      std::vector<std::string> cmd_args;
+      std::string redirect_file = "";
+      int redirect_fd = 1; // 1 for stdout, 2 for stderr
+      bool redirect = false;
+      bool append_mode = false;
+      for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == ">" || args[i] == "1>") {
+          // redirect stdout (truncate mode)
+          if (i + 1 < args.size()) {
+            redirect_file = args[i + 1];
+            redirect_fd = 1;
+            redirect = true;
+            append_mode = false;
+            break; // stop parsing args, rest are ignored after redirection
+          } else {
+            std::cout << "syntax error: expected file after " << args[i] << std::endl;
+            continue;
+          }
+        } else if (args[i] == ">>" || args[i] == "1>>") {
+          // redirect stdout (append mode)
+          if (i + 1 < args.size()) {
+            redirect_file = args[i + 1];
+            redirect_fd = 1;
+            redirect = true;
+            append_mode = true;
+            break; // stop parsing args, rest are ignored after redirection
+          } else {
+            std::cout << "syntax error: expected file after " << args[i] << std::endl;
+            continue;
+          }
+        } else if (args[i] == "2>") {
+          // redirect stderr (truncate mode)
+          if (i + 1 < args.size()) {
+            redirect_file = args[i + 1];
+            redirect_fd = 2;
+            redirect = true;
+            append_mode = false;
+            break; // stop parsing args, rest are ignored after redirection
+          } else {
+            std::cout << "syntax error: expected file after " << args[i] << std::endl;
+            continue;
+          }
+        } else if (args[i] == "2>>") {
+          // redirect stderr (append mode)
+          if (i + 1 < args.size()) {
+            redirect_file = args[i + 1];
+            redirect_fd = 2;
+            redirect = true;
+            append_mode = true;
+            break; // stop parsing args, rest are ignored after redirection
+          } else {
+            std::cout << "syntax error: expected file after " << args[i] << std::endl;
+            continue;
+          }
+        } else {
+          cmd_args.push_back(args[i]);
+        }
+      }
+      
+      if (cmd_args.empty()) {
+        std::cout << "syntax error: no command before redirection" << std::endl;
+        continue;
+      }
+      
+      std::string found_path = find_path(cmd_args[0]);
       if (found_path.size() == 0)
-        std::cout << args[0] << ": command not found" << std::endl;
+        std::cout << cmd_args[0] << ": command not found" << std::endl;
       else {
         // create a child process (to execute the command)
         pid_t pid = fork();
         // child process
         if (pid == 0) {
+          if (redirect) {
+            // open the file for writing, create if doesn't exist
+            // O_WRONLY: open for writing only
+            // O_CREAT: create the file if it doesn't exist
+            // O_TRUNC: truncate the file to zero length if it exists (used with > and 1>)
+            // O_APPEND: append to the end of file (used with >> and 1>>)
+            int flags = O_WRONLY | O_CREAT;
+            if (append_mode) {
+              flags |= O_APPEND;
+            } else {
+              flags |= O_TRUNC;
+            }
+            int fd = open(redirect_file.c_str(), flags, 0644);
+            if (fd == -1) {
+              std::cerr << "failed to open file: " << redirect_file << std::endl;
+              exit(1);
+            }
+            // redirect the appropriate file descriptor to the file
+            int target_fd = (redirect_fd == 1) ? STDOUT_FILENO : STDERR_FILENO;
+            dup2(fd, target_fd);
+            close(fd); // close the original fd since target now points to it
+          }
           // converting vector of string to vector of char*
           std::vector < char * > c_args;
-          for (auto & s: args) {
+          for (auto & s: cmd_args) {
             // c_str() return type is const_char* , so here we are converting it to char* using const_cast
             c_args.push_back(const_cast < char * > (s.c_str()));
           }
