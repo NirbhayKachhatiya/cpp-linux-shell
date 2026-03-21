@@ -14,7 +14,42 @@
 
 #include <fcntl.h>
 
+#include <readline/readline.h>
+
+#include <readline/history.h>
+
 namespace fs = std::filesystem;
+
+// list of builtin commands that we want to support for tab completion
+const std::vector<std::string> builtins = {"echo", "exit", "type", "pwd", "cd"};
+//map of all executable files present in the directories specified in the PATH environment variable
+std::map<std::string,bool> files_in_path;
+// track the state of multi-match completion to know when to ring bell vs display list
+int completion_display_count = 0;
+
+void generate_files_in_path() {
+  const char* env_p = std::getenv("PATH");
+  if(env_p) {
+    std::string path_env(env_p);
+    std::stringstream ss(path_env);
+    std::string dir;
+    
+    while(getline(ss, dir, ':')) {
+      if(!dir.empty() && fs::exists(dir)) {
+        // Use directory_iterator (not recursive) to only check the top level
+        try {
+            for(const auto& entry : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied)) {
+              // Only add actual files, not directories or symlinks to dirs
+              if(entry.is_regular_file()) {
+                std::string fileName = entry.path().filename().string();
+                files_in_path[fileName] = true;
+              }
+            }
+        } catch (...) {}
+      }
+    }
+  }
+}
 
 std::string find_path(std::string & word) {
   std::string found_path = "";
@@ -112,15 +147,130 @@ std::vector < std::string > tokenize(const std::string & input) {
   return tokens;
 }
 
+// Helper function to find the Longest Common Prefix of a set of strings
+std::string find_lcp(const std::set<std::string>& matches) {
+    if (matches.empty()) return "";
+    std::string lcp = *matches.begin();
+    for (const auto& s : matches) {
+        int j = 0;
+        while (j < lcp.length() && j < s.length() && lcp[j] == s[j]) {
+            j++;
+        }
+        lcp = lcp.substr(0, j);
+    }
+    return lcp;
+}
+
+// custom completion function that readline calls whenever the user presses tab
+// we check if what they typed matches the start of any builtin command like echo or exit
+// and also search for matching executables in PATH, returning all matches in sorted order
+char** completer(const char* text, int start, int end) {
+  // only complete at the beginning of the line, if they are typing mid-line or after other stuff, dont interfere
+  if (start != 0) return nullptr;
+
+  std::string prefix(text);
+  std::set<std::string> match_set;
+  
+  // collect all builtin commands that match the prefix
+  for (const auto& cmd : builtins) {
+    if (cmd.find(prefix) == 0) {
+      match_set.insert(cmd);
+    }
+  }
+  
+  // also collect all files in PATH that match the prefix
+  for(auto& fileName : files_in_path){
+    if(fileName.first.find(prefix)==0){
+      match_set.insert(fileName.first);
+    }
+  }
+  
+  // if no matches found, return null
+  if(match_set.empty()) {
+    return nullptr;
+  }
+  
+  completion_display_count++;
+
+  // sort all matches in alphabetical order so they display consistently
+  // (Handled by std::set)
+
+  // return matches (either single match or second tab of multiple matches)
+  char** completions = (char**)malloc((match_set.size() + 2) * sizeof(char*));
+  
+  if (match_set.size() == 1) {
+      // Single match: set append character to space
+      rl_completion_append_character = ' ';
+      completions[0] = strdup((*match_set.begin()).c_str());
+      completions[1] = nullptr;
+  } else {
+      // Multiple matches: find LCP and set append character to null
+      rl_completion_append_character = '\0';
+      std::string lcp = find_lcp(match_set);
+      completions[0] = strdup(lcp.c_str());
+      int i = 1;
+      for(const auto& m : match_set) {
+        completions[i++] = strdup(m.c_str());
+      }
+      completions[i] = nullptr;
+  }
+  
+  return completions;
+}
+
+// custom display function to handle the bell and listing behavior for multiple matches
+// on first display (first tab), ring a bell, on second display (second tab), show all matches
+void display_matches(char** matches, int num_matches, int max_length) {
+  // if this is the first time displaying multiple matches, just ring the bell
+  if(num_matches > 1 && completion_display_count == 1) {
+    std::cout << "\x07";  // ring the bell (ASCII 7)
+    std::cout.flush();
+  } 
+  // on the second call, display all matches in a formatted list
+  else if(num_matches > 1 && completion_display_count >= 2) {
+    std::cout << std::endl;
+    // print all matches separated by two spaces, in alphabetical order (already sorted in completer)
+    for(int i = 1; i <= num_matches; i++) {
+      std::cout << matches[i];
+      if(i < num_matches) {
+        std::cout << "  ";  // two spaces between matches
+      }
+    }
+    std::cout << std::endl;
+    // redisplay the prompt with the original input
+    rl_on_new_line();
+    rl_redisplay();
+  }
+}
+
 int main() {
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
+
+  generate_files_in_path();
+  // hook up our custom completer function to readline so it gets called whenever tab is pressed 
+  //rl_attempted_completion_function is a Readline variable so we don't need to define it explicitly
+  rl_attempted_completion_function = completer;
+  // hook up our custom display function to handle bell and listing for multiple matches
+  rl_completion_display_matches_hook = display_matches;
+  //set the character that readline appends after completion
+  rl_completion_append_character = ' ';
+
   std::string input;
   fs::path current_path = fs::current_path();
   while (true) {
-    std::cout << "$ ";
-    if (!std::getline(std::cin, input))
-      break;
+    // use readline instead of getline so we get tab completion and command history support
+    char* line = readline("$ ");
+    if (!line) break;
+    std::string input(line);
+    // readline allocates memory for the line, so we need to free it when done
+    free(line);
+    // reset the completion display counter for the next command so the bell rings again
+    completion_display_count = 0;
+    // add non-empty commands to the history so users can press up arrow to recall them
+    if (!input.empty()) {
+      add_history(input.c_str());
+    }
     if (input == "exit")
       break;
     else if (input.substr(0, 5) == "echo ") {
@@ -245,7 +395,8 @@ int main() {
         "echo",
         "exit",
         "type",
-        "pwd"
+        "pwd",
+        "cd"
       };
       bool val = 0;
       for (auto cmd: valid) {
